@@ -26,8 +26,8 @@ from esm.utils.types import FunctionAnnotation
 ## Logging in to HF and downloading the model
 from huggingface_hub import login
 
-def load_model():
-    login(token="hugging_face_token_string")  # replace huggingface_token with your token string
+def load_model(token: str):
+    login(token=token)
     model: ESMCInferenceClient = ESMC.from_pretrained("esmc_600m").to("cuda") # or "cpu"
     return model
 
@@ -48,6 +48,7 @@ class InferenceConfig:
 
         # Inference parameters
         p = self._cfg["parameters"]
+        self.token = p["token"]
         self.input_type = p["input_type"]
 
     @staticmethod
@@ -72,7 +73,6 @@ def read_fasta(fasta_path: str | Path):
         seq_str = str(record.seq).upper()       # convert to string, uppercase
         seq_str = clean_sequence(seq_str)   # clean the sequence
         sequences.append((seq_id, seq_str))
-        
     return sequences
 
 ## Clean the sequences (remove all non-alphabet characters)
@@ -92,7 +92,6 @@ def convert_pdb(pdb_path: str, pdb_id: str) -> ESMProtein:
     protein = ESMProtein.from_protein_chain(
         protein_chain
         )
-    
     return protein
 
 ## Convert the sequence to ESMProtein 
@@ -105,12 +104,13 @@ def convert_sequence(sequence: str) -> ESMProtein:
         sequence=sequence,
         potential_sequence_of_concern=True
         )
-    
     return protein
 
 # %%
 ## Input sequences and output logits and embeddings
-def logits_output_generator(protein: ESMProtein):
+def logits_output_generator(
+        model,
+        protein: ESMProtein):
     # Encode the input ESMProtein to tensor
     protein_tensor = model.encode(protein)
 
@@ -123,18 +123,20 @@ def logits_output_generator(protein: ESMProtein):
            ith_hidden_layer=-1
            )
     )
-    
     return logits_output
 
 # %%
 ## ESMC inference function for list of pdb IDs or sequences
-def inference_list_combined(pdb_id_list, sequences_list):
+def inference_list_combined(
+        model, 
+        pdb_id_list, 
+        sequences_list):
     logits_list, embeddings_list, hidden_states_list = [], [], []
 
     # Inference for sequences input
     if pdb_id_list is None and sequences_list is not None:
         for seq in sequences_list:
-            out = logits_output_generator(convert_sequence(seq))
+            out = logits_output_generator(model, convert_sequence(seq))
 
             logits_list.append(out.logits.sequence.squeeze(0).to("cuda", non_blocking=True))
             embeddings_list.append(out.embeddings.squeeze(0).to("cuda", non_blocking=True))
@@ -146,7 +148,7 @@ def inference_list_combined(pdb_id_list, sequences_list):
     # Inference for pdb ID input
     elif pdb_id_list is not None and sequences_list is None:
         for pdb_id in pdb_id_list:
-            out = logits_output_generator(convert_pdb(None, pdb_id))
+            out = logits_output_generator(model, convert_pdb(None, pdb_id))
 
             logits_list.append(out.logits.sequence.squeeze(0).to("cuda", non_blocking=True))
             embeddings_list.append(out.embeddings.squeeze(0).to("cuda", non_blocking=True))
@@ -154,7 +156,6 @@ def inference_list_combined(pdb_id_list, sequences_list):
             hs = getattr(out, "hidden_states", None)
             if isinstance(hs, torch.Tensor):
                 hidden_states_list.append(hs.squeeze().to("cuda", non_blocking=True))
-
     return logits_list, embeddings_list, hidden_states_list
 
 # %%
@@ -185,10 +186,14 @@ def load_and_infer(config_path: str | Path):
     # Load configuration
     cfg = InferenceConfig(config_path)
 
+    # Load the model
+    model = load_model(cfg.token)
+
     # Load data and run inference based on input type
     if cfg.input_type == "pdb":
         pdb_id_list = load_pdb(cfg.input_path)
         logits, embeddings, hidden_states = inference_list_combined(
+            model=model,
             pdb_id_list=pdb_id_list, 
             sequences_list=None
             )
@@ -196,6 +201,7 @@ def load_and_infer(config_path: str | Path):
     elif cfg.input_type == "fasta":
         sequences_aa_list, sequences_df = load_fasta(cfg.input_path)
         logits, embeddings, hidden_states = inference_list_combined(
+            model=model,
             pdb_id_list=None, 
             sequences_list=sequences_aa_list
             )
@@ -203,6 +209,7 @@ def load_and_infer(config_path: str | Path):
     elif cfg.input_type == "csv":
         sequences_aa_list, sequences_df = load_csv(cfg.input_path)
         logits, embeddings, hidden_states = inference_list_combined(
+            model=model,
             pdb_id_list=None, 
             sequences_list=sequences_aa_list
             )
@@ -218,7 +225,6 @@ def load_and_infer(config_path: str | Path):
         "hidden_states": hidden_states
     }
     torch.save(payload, cfg.output_path)
-    
     return 
 
 # %%
@@ -228,5 +234,4 @@ def esmc_local_embed(config_path: str | Path):
 
 # %%
 if __name__ == "__main__":
-    model = load_model()
     esmc_local_embed()

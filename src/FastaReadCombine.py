@@ -28,6 +28,7 @@ class ReadCombineConfig:
         self.order = p["order"]
         self.output_name = p["output_name"]
         self.sequence_sort_order = self._as_list(p["sequence_sort_order"])
+        self.columns_for_new_id = self._as_list(p["columns_for_new_id"])
 
     @staticmethod
     # Get the original (resolved) YAML as a list
@@ -84,7 +85,8 @@ def merge_protein_sequences(
         sequence, 
         output_name, 
         allowed, order, 
-        sequence_sort_order
+        sequence_sort_order, 
+        new_id_name
         ):
     subset = sequence.sort_values(by=sequence_sort_order)
     
@@ -99,14 +101,14 @@ def merge_protein_sequences(
 
     # Build the new rows with the name column
     new_rows = agg.assign(protein=output_name)
-
+    
     # Append to the original dataframe
     out = pd.concat([subset, new_rows], ignore_index=True)
-    out = fill_metadata(out, output_name)
+    out = fill_metadata(out, new_id_name, output_name)
     return out
 
 # Fill out NA entries in the metadata after merging 
-def fill_metadata(out, output_name):
+def fill_metadata(out, new_id_name, output_name):
     cols_to_fill = [c for c in out.columns if c not in ["isolate", "protein"]]
 
     # First non-null *value* per isolate; if none, use literal "NA"
@@ -126,6 +128,9 @@ def fill_metadata(out, output_name):
 
     # If anything is still a true-missing, make it literal "NA"
     out[cols_to_fill] = out[cols_to_fill].fillna("NA")
+
+    # Correct the id column to reflect new protein names
+    out['id'] = out[new_id_name].astype(str).agg('|'.join, axis=1)
     return out
 
 # %%
@@ -133,7 +138,7 @@ def fill_metadata(out, output_name):
 
 # Save the dataframe as a CSV file
 def save_fasta_as_dataframe(sequence, output_path):
-    sequence.to_csv(output_path, index=False, na_rep="NA")
+    sequence.to_csv(output_path, index=False, quoting=1)
     print(f"Data saved to {output_path}")
     return
 
@@ -156,7 +161,8 @@ def fasta_read_combine(config_path: str | Path):
         output_name=cfg.output_name,
         allowed=cfg.allowed,
         order=cfg.order,
-        sequence_sort_order=cfg.sequence_sort_order
+        sequence_sort_order=cfg.sequence_sort_order,
+        new_id_name=cfg.columns_for_new_id
     )
 
     # Save the resulting dataframe
