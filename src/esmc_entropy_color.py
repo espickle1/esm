@@ -11,7 +11,13 @@ from typing import Any
 
 # Specialized libraries
 import seaborn as sns
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import (
+    MinMaxScaler, 
+    QuantileTransformer, 
+    PowerTransformer, 
+    StandardScaler, 
+    RobustScaler
+)
 
 # %%
 ## Create class containing read and combine configuration
@@ -27,8 +33,14 @@ class ColorConfig:
 
         # Inference parameters
         p = self._cfg["parameters"]
+        self.transform_method = p["transform_method"]
+        # Color mapping
+        self.color_mapping = p["color_mapping"]
         self.cmap_name = p["cmap_name"]
-        self.invert = p["invert"]
+        self.color_invert = p["color_mapping_invert"]
+        # Transparency mapping
+        self.transparency_mapping = p["transparency_mapping"]
+        self.transparency_invert = p["transparency_mapping_invert"]
 
     @staticmethod
     # Get the original (resolved) YAML as a list
@@ -45,18 +57,18 @@ class ColorConfig:
 
 # %%
 ## Calculate the rgb color based on the input scalar
-def generate_palette_rgb_v5(
+def generate_palette_rgb(
             cmap, 
             data_minmax, 
             model_number,
-            invert: str
+            color_invert: str
             ):      
       color_list = []
 
       # Calculate the color mapping
       for idx, value in enumerate(data_minmax):
             # Correct if the colormap is inverted
-            if invert == "True":
+            if color_invert == "True":
                 rgba_0_1 = cmap(1 - value)
             else:
                 rgba_0_1 = cmap(value)
@@ -70,14 +82,77 @@ def generate_palette_rgb_v5(
       return color_list
 
 # %%
+## Calculate transparency based on the input scalar
+def generate_transparency(
+            data_minmax, 
+            model_number,
+            transparency_invert: str
+            ):      
+      transparency_list = []
+
+      # Calculate the transparency mapping
+      for idx, value in enumerate(data_minmax):
+            # Correct if the transparency is inverted
+            if transparency_invert == "True":
+                transparency = 1 - value
+            else:
+                transparency = value
+
+            # Calculate the transparency mapping
+            transparency = max(0, min(1, transparency))
+            transparency_text = f"transparency #{model_number}:{idx + 1} {transparency} atoms,cartoons,surface"
+            transparency_list.append(str(transparency_text))
+
+      return transparency_list
+
+# %%
 ## Scale and normalize the data
-def data_scaler(entropy_mean_values):
-    data_minmax = MinMaxScaler().fit_transform(entropy_mean_values.values.reshape(-1, 1)).flatten()
-    return data_minmax
+def data_scaler(entropy_mean_values, transform_method: str):
+    """
+    Apply various scaling/transformation methods to entropy values.
+    
+    Args:
+        entropy_mean_values: Input data to be scaled
+        transform_method: Type of transformation ('quantile', 'power', 'standard', 'robust', or other)
+    
+    Returns:
+        Scaled/transformed values as a flattened numpy array
+    """
+    if transform_method == "quantile":
+        # Quantile transformer maps values to uniform distribution [0, 1]
+        scaled_values = QuantileTransformer(output_distribution="uniform").fit_transform(
+            entropy_mean_values.values.reshape(-1, 1)
+        ).flatten()
+    elif transform_method == "power":
+        # Power transformer applies Yeo-Johnson transformation for skewed data
+        scaled_values = PowerTransformer(method="yeo-johnson").fit_transform(
+            entropy_mean_values.values.reshape(-1, 1)
+        ).flatten()
+    elif transform_method == "standard":
+        # Standard scaler normalizes to zero mean and unit variance
+        scaled_values = StandardScaler().fit_transform(
+            entropy_mean_values.values.reshape(-1, 1)
+        ).flatten()
+    elif transform_method == "robust":
+        # Robust scaler uses median and IQR, less sensitive to outliers
+        scaled_values = RobustScaler().fit_transform(
+            entropy_mean_values.values.reshape(-1, 1)
+        ).flatten()
+    else:
+        # Default: return values as-is without transformation
+        scaled_values = entropy_mean_values.values.flatten()
+        
+    return scaled_values
 
 # %%
 ## Generate the color map
-def generate_color_map(config_path: str | Path):
+def generate_color_map(config_path: str):
+    """
+    Generate color and transparency mappings for molecular visualization.
+    
+    Args:
+        config_path: Path to the YAML configuration file (default: "config.yaml")
+    """
     # Load configuration from YAML file
     cfg = ColorConfig(config_path)
 
@@ -85,40 +160,68 @@ def generate_color_map(config_path: str | Path):
     polymerase_analysis_file_name_no_ext = Path(cfg.input_path).stem
     
     # Read entropy mean values from CSV file
-    polymerase_entropy_mean = pd.read_csv(
-        cfg.input_path
-        )
+    polymerase_entropy_mean = pd.read_csv(cfg.input_path)
 
     # Construct colormap name, appending "_invert" if inversion is enabled
     cmap_name_file = cfg.cmap_name
-    if cfg.invert == "True":
+    if cfg.color_invert == "True":
         cmap_name_file = cmap_name_file + "_invert"
     
     # Generate output file name
     cxc_file_name = f"entropy_color_mapping_{cmap_name_file}"
+    if cfg.transparency_mapping == "True":
+        cxc_file_name = cxc_file_name + "_transparency"
+
+    # Initialize lists to hold color and transparency mappings for all residues
     color_list_total = []
+    transparency_list_total = []
     
     # Load the colormap from seaborn
     cmap = sns.color_palette(cfg.cmap_name, as_cmap=True)
 
-    # Normalize entropy values to 0-1 range using MinMaxScaler
-    data_minmax = data_scaler(polymerase_entropy_mean)
+    # Scale and normalize entropy values with transformer
+    polymerase_entropy_mean_transformed = data_scaler(
+        polymerase_entropy_mean, 
+        cfg.transform_method
+        )
 
-    # Generate RGB color mappings for the normalized data
+    # Normalize entropy values to 0-1 range using MinMaxScaler
+    data_minmax = MinMaxScaler().fit_transform(
+        polymerase_entropy_mean_transformed.reshape(-1, 1)).flatten()
+
+    # Generate color and transparency mappings for the normalized data
     model_number = 1
-    color_list = generate_palette_rgb_v5(
+
+    # Generate color mappings if enabled
+    if cfg.color_mapping == "True":
+        color_list = generate_palette_rgb(
             cmap=cmap, 
             data_minmax=data_minmax, 
             model_number=model_number,
-            invert=cfg.invert
-            )
-    color_list_total.extend(color_list)
+            color_invert=cfg.color_invert
+        )
+        color_list_total.extend(color_list)
+    
+    # Generate transparency mappings if enabled
+    if cfg.transparency_mapping == "True":
+        transparency_list = generate_transparency(
+            data_minmax=data_minmax, 
+            model_number=model_number,
+            transparency_invert=cfg.transparency_invert
+        )
+        transparency_list_total.extend(transparency_list)
 
-    # Write color mappings to output CXC file
+    # Write color and transparency mappings to output CXC file
     output_file = cfg.output_dir / f"{cxc_file_name}_{polymerase_analysis_file_name_no_ext}.cxc"
     with open(output_file, "w") as f:
-        for residue in color_list_total:
-            f.write(f"{residue}\n")
+        if cfg.color_mapping == "True":
+            for residue in color_list_total:
+                f.write(f"{residue}\n")
+        if cfg.transparency_mapping == "True":
+            for residue in transparency_list_total:
+                f.write(f"{residue}\n")
+        else:
+            f.write("select clear")
 
     return
 
